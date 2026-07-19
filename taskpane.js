@@ -145,11 +145,11 @@ function addFilterRow() {
   controls.appendChild(select);
   controls.appendChild(input);
 
-  // Footer: ignore toggle + remove button
+  // Footer: ignore toggle + split toggle + remove button
   const footer = document.createElement('div');
   footer.className = 'filter-footer';
 
-  // Toggle
+  // — Ignore casing & spaces toggle —
   const toggleId = 'toggle-' + filterCount;
   const toggleWrap = document.createElement('label');
   toggleWrap.className = 'toggle-wrap';
@@ -165,13 +165,50 @@ function addFilterRow() {
 
   const toggleLabel = document.createElement('span');
   toggleLabel.className   = 'toggle-label';
-  toggleLabel.textContent = 'Ignore casing & spaces';
+  toggleLabel.textContent = 'Ignore case/spaces';
 
   toggleWrap.appendChild(checkbox);
   toggleWrap.appendChild(track);
   toggleWrap.appendChild(toggleLabel);
 
-  // Remove button
+  // — Split into sheets toggle —
+  const splitId = 'split-' + filterCount;
+  const splitWrap = document.createElement('label');
+  splitWrap.className = 'toggle-wrap';
+  splitWrap.htmlFor   = splitId;
+
+  const splitCheckbox = document.createElement('input');
+  splitCheckbox.type    = 'checkbox';
+  splitCheckbox.id      = splitId;
+  splitCheckbox.checked = false; // OFF by default
+
+  const splitTrack = document.createElement('span');
+  splitTrack.className = 'toggle-track split-track';
+
+  const splitLabel = document.createElement('span');
+  splitLabel.className   = 'toggle-label';
+  splitLabel.textContent = 'Split into sheets';
+
+  splitCheckbox.onchange = function () {
+    if (splitCheckbox.checked) {
+      row.classList.add('split-active');
+      input.disabled    = true;
+      input.placeholder = 'One sheet per unique value';
+      input.value       = '';
+    } else {
+      row.classList.remove('split-active');
+      input.disabled    = false;
+      input.placeholder = 'Value (empty = match blanks)';
+    }
+    refreshApplyBtn();
+    updateLogicNote();
+  };
+
+  splitWrap.appendChild(splitCheckbox);
+  splitWrap.appendChild(splitTrack);
+  splitWrap.appendChild(splitLabel);
+
+  // — Remove button —
   const removeBtn = document.createElement('button');
   removeBtn.className   = 'btn btn-danger';
   removeBtn.textContent = '✕';
@@ -179,6 +216,7 @@ function addFilterRow() {
   removeBtn.onclick     = function () { removeFilterRow(id); };
 
   footer.appendChild(toggleWrap);
+  footer.appendChild(splitWrap);
   footer.appendChild(removeBtn);
 
   row.appendChild(controls);
@@ -226,14 +264,16 @@ function getFilters() {
   const rows = document.querySelectorAll('.filter-row');
   const filters = [];
   rows.forEach(function (row) {
-    const select   = row.querySelector('select');
-    const input    = row.querySelector('input[type="text"]');
-    const checkbox = row.querySelector('input[type="checkbox"]');
-    const colIdx   = select ? parseInt(select.value, 10) : NaN;
-    const value    = input  ? input.value : '';          // keep raw — ignore logic applied at match time
-    const ignore   = checkbox ? checkbox.checked : true; // default ON
+    const select        = row.querySelector('select');
+    const input         = row.querySelector('input[type="text"]');
+    const ignoreChk     = row.querySelector('input[id^="toggle-"]');
+    const splitChk      = row.querySelector('input[id^="split-"]');
+    const colIdx        = select ? parseInt(select.value, 10) : NaN;
+    const value         = input  ? input.value : '';
+    const ignore        = ignoreChk ? ignoreChk.checked : true;
+    const split         = splitChk  ? splitChk.checked  : false;
     if (!isNaN(colIdx) && select.value !== '') {
-      filters.push({ colIdx: colIdx, value: value, ignore: ignore });
+      filters.push({ colIdx: colIdx, value: value, ignore: ignore, split: split });
     }
   });
   return filters;
@@ -281,113 +321,192 @@ function updateLogicNote() {
   }
 }
 
-/* ── Step 3 : Apply filters & create sheet ────────────── */
+/* ── Shared helpers ────────────────────────────────────── */
+
+// Convert any cell value to something the Excel API can write back safely.
+function safeCell(cell) {
+  if (cell === null || cell === undefined) return '';
+  if (typeof cell === 'object') return '';  // Excel error objects e.g. { error: '#VALUE!' }
+  if (typeof cell === 'number' || typeof cell === 'boolean') return cell;
+  return String(cell);
+}
+
+// Strip chars invalid in Excel sheet names, collapse spaces, truncate to 31.
+function sanitizeSheetName(name) {
+  var clean = name.replace(/[\/\\?\*\[\]:]/g, '').replace(/\s+/g, ' ').trim();
+  if (!clean) clean = 'Sheet';
+  return clean.length > 31 ? clean.substring(0, 31) : clean;
+}
+
+// Make a sheet name unique within a set of already-used names.
+function uniqueSheetName(base, used) {
+  var name = sanitizeSheetName(base);
+  if (!used[name]) { used[name] = true; return name; }
+  var i = 2;
+  while (used[sanitizeSheetName(base + '_' + i)]) i++;
+  var result = sanitizeSheetName(base + '_' + i);
+  used[result] = true;
+  return result;
+}
+
+// Write a block of rows (with green header) to a new sheet and return it.
+function writeSheet(context, sheetName, rows) {
+  var newSheet  = context.workbook.worksheets.add(sheetName);
+  var lastCol   = colLetter(capturedHeaders.length);
+  var totalRows = rows.length;
+
+  var writeRange = newSheet.getRange('A1:' + lastCol + totalRows);
+  writeRange.values = rows;
+
+  var headerRange = newSheet.getRange('A1:' + lastCol + '1');
+  headerRange.format.fill.color = '#217346';
+  headerRange.format.font.color = '#FFFFFF';
+  headerRange.format.font.bold  = true;
+  headerRange.format.font.size  = 11;
+
+  writeRange.format.autofitColumns();
+  return newSheet;
+}
+
+// Apply match-only filters and return the surviving rows.
+function applyMatchFilters(rows, matchFilters) {
+  if (matchFilters.length === 0) return rows;
+
+  var grouped = {};
+  matchFilters.forEach(function (f) {
+    var key = String(f.colIdx);
+    if (!grouped[key]) grouped[key] = [];
+    grouped[key].push({
+      target: f.ignore ? f.value.replace(/\s+/g, '').toLowerCase() : f.value,
+      ignore: f.ignore
+    });
+  });
+
+  return rows.filter(function (row) {
+    return Object.keys(grouped).every(function (colIdxStr) {
+      var colIdx  = parseInt(colIdxStr, 10);
+      var entries = grouped[colIdxStr];
+      var rawCell = row[colIdx] !== null && row[colIdx] !== undefined
+        ? String(row[colIdx]) : '';
+      return entries.some(function (e) {
+        var cellVal = e.ignore ? rawCell.replace(/\s+/g, '').toLowerCase() : rawCell;
+        return cellVal === e.target;
+      });
+    });
+  });
+}
+
+/* ── Step 3 : Apply filters & create sheet(s) ─────────── */
 async function applyFilters() {
   clearStatus();
-  const filters = getFilters();
+  var filters = getFilters();
 
   if (filters.length === 0) {
-    showStatus('Please add at least one filter with a column and value selected.', 'error');
+    showStatus('Please add at least one filter with a column selected.', 'error');
     return;
   }
 
-  const btn = document.getElementById('apply-btn');
+  var splitFilters = filters.filter(function (f) { return f.split; });
+  var matchFilters = filters.filter(function (f) { return !f.split; });
+
+  if (splitFilters.length > 1) {
+    showStatus('Only one <strong>"Split into sheets"</strong> column at a time is supported. Please turn off the split toggle on all but one filter.', 'error');
+    return;
+  }
+
+  var btn = document.getElementById('apply-btn');
   btn.disabled = true;
   btn.innerHTML = '<span class="loader"></span> Filtering…';
 
   try {
-    // Group filters by colIdx.
-    // Each group holds an array of { target, ignore } entries.
-    // Same column = OR across entries; different columns = AND.
-    const grouped = {};
-    filters.forEach(function (f) {
-      const key = String(f.colIdx);
-      if (!grouped[key]) grouped[key] = [];
 
-      const target = f.ignore
-        ? f.value.replace(/\s+/g, '').toLowerCase()  // normalise target
-        : f.value;                                     // exact target
+    /* ── NORMAL MODE: one filtered sheet ─────────────────── */
+    if (splitFilters.length === 0) {
+      var matchedRows = applyMatchFilters(capturedData, matchFilters);
 
-      grouped[key].push({ target: target, ignore: f.ignore });
-    });
-
-    // Filter the data rows
-    const matchedRows = capturedData.filter(function (row) {
-      // Every column group must match (AND)
-      return Object.keys(grouped).every(function (colIdxStr) {
-        const colIdx  = parseInt(colIdxStr, 10);
-        const entries = grouped[colIdxStr];
-        const rawCell = row[colIdx] !== null && row[colIdx] !== undefined
-          ? String(row[colIdx])
-          : '';
-
-        // Any entry in the group must match (OR within column)
-        return entries.some(function (e) {
-          const cellVal = e.ignore
-            ? rawCell.replace(/\s+/g, '').toLowerCase()
-            : rawCell;
-          return cellVal === e.target;
-        });
-      });
-    });
-
-    if (matchedRows.length === 0) {
-      showStatus('No rows matched your filters. Try different column values and try again.', 'info');
-      restoreApplyBtn();
-      return;
-    }
-
-    // Write to Excel
-    await Excel.run(async (context) => {
-      const sheets    = context.workbook.worksheets;
-      const timestamp = new Date();
-      const sheetName = 'Filtered_' +
-        padTwo(timestamp.getHours()) + padTwo(timestamp.getMinutes()) + padTwo(timestamp.getSeconds());
-
-      const newSheet = sheets.add(sheetName);
-      newSheet.activate();
-
-      // Write header + data
-      // safeCell: converts any value Excel might return into something
-      // the API can write back (numbers, strings, booleans, empty string).
-      // Error-value objects (e.g. { error: '#VALUE!' }) become empty string.
-      function safeCell(cell) {
-        if (cell === null || cell === undefined) return '';
-        if (typeof cell === 'object') return '';   // Excel error objects
-        if (typeof cell === 'number' || typeof cell === 'boolean') return cell;
-        return String(cell);
+      if (matchedRows.length === 0) {
+        showStatus('No rows matched your filters. Try different values and try again.', 'info');
+        restoreApplyBtn();
+        return;
       }
 
-      const outputData = [capturedHeaders.map(String)].concat(
-        matchedRows.map(function (row) {
-          return row.map(safeCell);
-        })
-      );
+      await Excel.run(async function (context) {
+        var ts        = new Date();
+        var sheetName = 'Filtered_' + padTwo(ts.getHours()) + padTwo(ts.getMinutes()) + padTwo(ts.getSeconds());
+        var outputData = [capturedHeaders.map(String)].concat(matchedRows.map(function (r) { return r.map(safeCell); }));
 
-      const lastCol   = colLetter(capturedHeaders.length);
-      const totalRows = outputData.length;
+        var newSheet = writeSheet(context, sheetName, outputData);
+        newSheet.activate();
+        await context.sync();
 
-      const writeRange = newSheet.getRange('A1:' + lastCol + totalRows);
-      writeRange.values = outputData;
+        showStatus(
+          '✓ Done! Sheet <strong>"' + sheetName + '"</strong> created with <strong>' +
+          matchedRows.length + '</strong> matching row' + (matchedRows.length !== 1 ? 's' : '') + '.',
+          'success'
+        );
+      });
+    }
 
-      // Style the header row
-      const headerRange = newSheet.getRange('A1:' + lastCol + '1');
-      headerRange.format.fill.color = '#217346';
-      headerRange.format.font.color = '#FFFFFF';
-      headerRange.format.font.bold  = true;
-      headerRange.format.font.size  = 11;
+    /* ── SPLIT MODE: one sheet per unique column value ───── */
+    else {
+      var splitF      = splitFilters[0];
+      var splitColIdx = splitF.colIdx;
+      var splitColName = capturedHeaders[splitColIdx] || ('Col' + splitColIdx);
 
-      // Auto-fit columns
-      writeRange.format.autofitColumns();
+      // First apply any regular match filters
+      var preFiltered = applyMatchFilters(capturedData, matchFilters);
 
-      await context.sync();
+      if (preFiltered.length === 0) {
+        showStatus('No rows matched your filters. Try different values and try again.', 'info');
+        restoreApplyBtn();
+        return;
+      }
 
-      showStatus(
-        '✓ Done! Sheet <strong>"' + sheetName + '"</strong> created with <strong>' +
-        matchedRows.length + '</strong> matching row' + (matchedRows.length !== 1 ? 's' : '') + '.',
-        'success'
-      );
-    });
+      // Group rows by unique value in the split column.
+      // Use ignore flag from the split filter for grouping key normalisation,
+      // but keep the original display value for the sheet name.
+      var groups = {};      // normalisedKey -> { display, rows[] }
+      var groupOrder = [];  // preserve insertion order
+
+      preFiltered.forEach(function (row) {
+        var raw = row[splitColIdx] !== null && row[splitColIdx] !== undefined
+          ? String(row[splitColIdx]) : '';
+        var key = splitF.ignore ? raw.replace(/\s+/g, '').toLowerCase() : raw;
+
+        if (!groups[key]) {
+          groups[key] = { display: raw || '(Blank)', rows: [] };
+          groupOrder.push(key);
+        }
+        groups[key].rows.push(row);
+      });
+
+      var totalSheets = groupOrder.length;
+
+      await Excel.run(async function (context) {
+        var usedNames = {};
+        var firstSheet = null;
+
+        groupOrder.forEach(function (key) {
+          var entry     = groups[key];
+          var baseName  = splitColName + '_' + (entry.display === '(Blank)' ? 'Blank' : entry.display);
+          var sheetName = uniqueSheetName(baseName, usedNames);
+          var outputData = [capturedHeaders.map(String)].concat(entry.rows.map(function (r) { return r.map(safeCell); }));
+          var sheet = writeSheet(context, sheetName, outputData);
+          if (!firstSheet) firstSheet = sheet;
+        });
+
+        if (firstSheet) firstSheet.activate();
+        await context.sync();
+
+        showStatus(
+          '✓ Done! Created <strong>' + totalSheets + ' sheet' + (totalSheets !== 1 ? 's' : '') +
+          '</strong> — one per unique value in <strong>"' + splitColName + '"</strong>' +
+          (matchFilters.length ? ' (after applying your other filters)' : '') + '.',
+          'success'
+        );
+      });
+    }
+
   } catch (err) {
     showStatus('Something went wrong: ' + (err.message || err), 'error');
   } finally {
@@ -396,8 +515,8 @@ async function applyFilters() {
 }
 
 function restoreApplyBtn() {
-  const btn = document.getElementById('apply-btn');
-  btn.innerHTML = '✦ Apply Filters &amp; Create New Sheet';
+  var btn = document.getElementById('apply-btn');
+  btn.innerHTML = '✦ Apply Filters &amp; Create Sheet(s)';
   btn.disabled  = false;
 }
 
