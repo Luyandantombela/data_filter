@@ -187,7 +187,12 @@
     .filter-footer {
       display: flex;
       align-items: center;
-      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 6px;
+    }
+
+    .filter-footer .btn-danger {
+      margin-left: auto;
     }
 
     .filter-row select,
@@ -251,9 +256,23 @@
       left: 17px;
     }
 
+    .toggle-wrap input:checked + .split-track {
+      background: #1a6fa8;
+    }
+
     .toggle-label {
       font-size: 11px;
       color: #555;
+    }
+
+    .filter-row.split-active {
+      border-color: #b8d4f0;
+      background: #f0f6fc;
+    }
+
+    .filter-row.split-active .filter-controls input {
+      background: #e8eef5;
+      color: #999;
     }
 
     .empty-state {
