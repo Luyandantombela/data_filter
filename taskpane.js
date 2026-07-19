@@ -124,6 +124,7 @@ function addFilterRow() {
   defaultOpt.value = '';
   defaultOpt.textContent = '— Column —';
   select.appendChild(defaultOpt);
+  select.onchange = function () { refreshApplyBtn(); updateLogicNote(); };
 
   capturedHeaders.forEach(function (header, idx) {
     const opt = document.createElement('option');
@@ -135,8 +136,9 @@ function addFilterRow() {
   // Value input
   const input = document.createElement('input');
   input.type        = 'text';
-  input.placeholder = 'Value to match…';
+  input.placeholder = 'Value (leave empty to match blank cells)';
   input.title       = 'Value';
+  input.oninput = function () { updateLogicNote(); };
 
   // Remove button
   const removeBtn = document.createElement('button');
@@ -195,7 +197,7 @@ function getFilters() {
     const input  = row.querySelector('input');
     const colIdx = select ? parseInt(select.value, 10) : NaN;
     const value  = input  ? input.value.trim() : '';
-    if (!isNaN(colIdx) && select.value !== '' && value !== '') {
+    if (!isNaN(colIdx) && select.value !== '') {
       filters.push({ colIdx: colIdx, value: value });
     }
   });
@@ -204,8 +206,14 @@ function getFilters() {
 
 function refreshApplyBtn() {
   const btn = document.getElementById('apply-btn');
-  const hasFilters = getFilters().length > 0;
-  btn.disabled = !hasFilters;
+  // Enable as soon as at least one filter row has a column selected
+  const rows = document.querySelectorAll('.filter-row');
+  let hasColumn = false;
+  rows.forEach(function (row) {
+    const select = row.querySelector('select');
+    if (select && select.value !== '') hasColumn = true;
+  });
+  btn.disabled = !hasColumn;
 }
 
 function updateLogicNote() {
