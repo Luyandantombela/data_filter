@@ -117,7 +117,10 @@ function addFilterRow() {
   row.className = 'filter-row';
   row.id = id;
 
-  // Column select
+  // Top controls: column select + value input
+  const controls = document.createElement('div');
+  controls.className = 'filter-controls';
+
   const select = document.createElement('select');
   select.title = 'Column';
   const defaultOpt = document.createElement('option');
@@ -133,12 +136,40 @@ function addFilterRow() {
     select.appendChild(opt);
   });
 
-  // Value input
   const input = document.createElement('input');
   input.type        = 'text';
-  input.placeholder = 'Value (leave empty to match blank cells)';
+  input.placeholder = 'Value (empty = match blanks)';
   input.title       = 'Value';
   input.oninput = function () { updateLogicNote(); };
+
+  controls.appendChild(select);
+  controls.appendChild(input);
+
+  // Footer: ignore toggle + remove button
+  const footer = document.createElement('div');
+  footer.className = 'filter-footer';
+
+  // Toggle
+  const toggleId = 'toggle-' + filterCount;
+  const toggleWrap = document.createElement('label');
+  toggleWrap.className = 'toggle-wrap';
+  toggleWrap.htmlFor   = toggleId;
+
+  const checkbox = document.createElement('input');
+  checkbox.type    = 'checkbox';
+  checkbox.id      = toggleId;
+  checkbox.checked = true; // ON by default
+
+  const track = document.createElement('span');
+  track.className = 'toggle-track';
+
+  const toggleLabel = document.createElement('span');
+  toggleLabel.className   = 'toggle-label';
+  toggleLabel.textContent = 'Ignore casing & spaces';
+
+  toggleWrap.appendChild(checkbox);
+  toggleWrap.appendChild(track);
+  toggleWrap.appendChild(toggleLabel);
 
   // Remove button
   const removeBtn = document.createElement('button');
@@ -147,9 +178,11 @@ function addFilterRow() {
   removeBtn.title       = 'Remove this filter';
   removeBtn.onclick     = function () { removeFilterRow(id); };
 
-  row.appendChild(select);
-  row.appendChild(input);
-  row.appendChild(removeBtn);
+  footer.appendChild(toggleWrap);
+  footer.appendChild(removeBtn);
+
+  row.appendChild(controls);
+  row.appendChild(footer);
 
   document.getElementById('filters-list').appendChild(row);
 
@@ -193,12 +226,14 @@ function getFilters() {
   const rows = document.querySelectorAll('.filter-row');
   const filters = [];
   rows.forEach(function (row) {
-    const select = row.querySelector('select');
-    const input  = row.querySelector('input');
-    const colIdx = select ? parseInt(select.value, 10) : NaN;
-    const value  = input  ? input.value.trim() : '';
+    const select   = row.querySelector('select');
+    const input    = row.querySelector('input[type="text"]');
+    const checkbox = row.querySelector('input[type="checkbox"]');
+    const colIdx   = select ? parseInt(select.value, 10) : NaN;
+    const value    = input  ? input.value : '';          // keep raw — ignore logic applied at match time
+    const ignore   = checkbox ? checkbox.checked : true; // default ON
     if (!isNaN(colIdx) && select.value !== '') {
-      filters.push({ colIdx: colIdx, value: value });
+      filters.push({ colIdx: colIdx, value: value, ignore: ignore });
     }
   });
   return filters;
@@ -261,13 +296,19 @@ async function applyFilters() {
   btn.innerHTML = '<span class="loader"></span> Filtering…';
 
   try {
-    // Build grouped filters:  { colIdx -> [value1, value2, …] }
-    // Same column = OR across values; different columns = AND
+    // Group filters by colIdx.
+    // Each group holds an array of { target, ignore } entries.
+    // Same column = OR across entries; different columns = AND.
     const grouped = {};
     filters.forEach(function (f) {
-      const key = f.colIdx;
+      const key = String(f.colIdx);
       if (!grouped[key]) grouped[key] = [];
-      grouped[key].push(f.value.toLowerCase());
+
+      const target = f.ignore
+        ? f.value.replace(/\s+/g, '').toLowerCase()  // normalise target
+        : f.value;                                     // exact target
+
+      grouped[key].push({ target: target, ignore: f.ignore });
     });
 
     // Filter the data rows
@@ -275,12 +316,18 @@ async function applyFilters() {
       // Every column group must match (AND)
       return Object.keys(grouped).every(function (colIdxStr) {
         const colIdx  = parseInt(colIdxStr, 10);
-        const targets = grouped[colIdxStr];
-        const cellVal = row[colIdx] !== null && row[colIdx] !== undefined
-          ? String(row[colIdx]).toLowerCase()
+        const entries = grouped[colIdxStr];
+        const rawCell = row[colIdx] !== null && row[colIdx] !== undefined
+          ? String(row[colIdx])
           : '';
-        // Any target value must match (OR within column)
-        return targets.some(function (t) { return cellVal === t; });
+
+        // Any entry in the group must match (OR within column)
+        return entries.some(function (e) {
+          const cellVal = e.ignore
+            ? rawCell.replace(/\s+/g, '').toLowerCase()
+            : rawCell;
+          return cellVal === e.target;
+        });
       });
     });
 
@@ -301,34 +348,37 @@ async function applyFilters() {
       newSheet.activate();
 
       // Write header + data
+      // safeCell: converts any value Excel might return into something
+      // the API can write back (numbers, strings, booleans, empty string).
+      // Error-value objects (e.g. { error: '#VALUE!' }) become empty string.
+      function safeCell(cell) {
+        if (cell === null || cell === undefined) return '';
+        if (typeof cell === 'object') return '';   // Excel error objects
+        if (typeof cell === 'number' || typeof cell === 'boolean') return cell;
+        return String(cell);
+      }
+
       const outputData = [capturedHeaders.map(String)].concat(
         matchedRows.map(function (row) {
-          return row.map(function (cell) {
-            return cell !== null && cell !== undefined ? cell : '';
-          });
+          return row.map(safeCell);
         })
       );
 
-      const writeRange = newSheet.getRange(
-        'A1:' + colLetter(capturedHeaders.length) + outputData.length
-      );
+      const lastCol   = colLetter(capturedHeaders.length);
+      const totalRows = outputData.length;
+
+      const writeRange = newSheet.getRange('A1:' + lastCol + totalRows);
       writeRange.values = outputData;
 
       // Style the header row
-      const headerRange = newSheet.getRange('A1:' + colLetter(capturedHeaders.length) + '1');
-      headerRange.format.fill.color     = '#217346';
-      headerRange.format.font.color     = '#FFFFFF';
-      headerRange.format.font.bold      = true;
-      headerRange.format.font.size      = 11;
+      const headerRange = newSheet.getRange('A1:' + lastCol + '1');
+      headerRange.format.fill.color = '#217346';
+      headerRange.format.font.color = '#FFFFFF';
+      headerRange.format.font.bold  = true;
+      headerRange.format.font.size  = 11;
 
       // Auto-fit columns
       writeRange.format.autofitColumns();
-
-      // Bold borders on the table
-      writeRange.format.borders.getItem('EdgeBottom').style = 'Thin';
-      writeRange.format.borders.getItem('EdgeLeft').style   = 'Thin';
-      writeRange.format.borders.getItem('EdgeRight').style  = 'Thin';
-      writeRange.format.borders.getItem('EdgeTop').style    = 'Thin';
 
       await context.sync();
 
